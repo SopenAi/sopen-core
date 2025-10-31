@@ -1,12 +1,3 @@
-/**
- * server.js
- * ----------------------------------------------------
- * الخادم الرئيسي لنظام النشر الذكي (Sopen).
- * مسؤولياته: 1. الاتصال بقاعدة البيانات. 2. بدء خادم Express. 3. تشغيل نظام الجدولة.
- * 🌟 تحديث: تم فصل جميع نقاط النهاية إلى وحدات توجيه (Routes) منفصلة.
- * 🚨 تحديث حاسم: تم تعطيل اتصال RabbitMQ مؤقتاً لضمان بدء تشغيل الخادم (Direct Publishing).
- * ⚡ تحديث: تم إزالة انتظار Redis لضمان بدء تشغيل الخادم بشكل أسرع.
- */
 
 import 'dotenv/config'; 
 import express from 'express';
@@ -15,17 +6,14 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import config from './config/config.js'; 
 import { connectDB } from './database/db.js';
-// ⬅️ استيراد دوال الاتصال لـ Redis
+
 import { connectRedis } from './database/cache.js'; 
-// ⬅️ تم إزالة استيراد RabbitMQ (لأنه معطل الآن)
-// import { connectMQ } from './queue/mq.js'; 
-// import { startConsumer } from './queue/mq-consumer.js'; 
 import { setupAndStartScheduler } from './config/scheduler.js';
 import { logSuccess, logError } from './utils/notifier.js';
 import { startFileWatcher } from './utils/fileWatcher.js'; 
 import { createHomepage } from './website/generator.js'; 
+
 import * as admin from 'firebase-admin';
-// ⬅️ استيراد وحدات التوجيه بعد فصل المسارات
 import publicRoutes from './routes/publicRoutes.js'; 
 import userRoutes from './routes/userRoutes.js';   
 import adminRoutes from './routes/adminRoutes.js'; 
@@ -39,11 +27,6 @@ const WEBSITE_PAGES_PATH = path.resolve(__dirname, 'website', 'pages');
 const WEBSITE_ASSETS_PATH = path.resolve(__dirname, 'website', 'assets');
 
 
-/**
- * ------------------------------------------------------------------------
- * تهيئة Firebase Admin (يتطلب config.FIREBASE_CONFIG_JSON)
- * ------------------------------------------------------------------------
- */
 if (process.env.FIREBASE_CONFIG_JSON) {
     try {
         const serviceAccount = JSON.parse(process.env.FIREBASE_CONFIG_JSON);
@@ -61,30 +44,20 @@ if (process.env.FIREBASE_CONFIG_JSON) {
 }
 
 
-/**
- * ------------------------------------------------------------------------
- * تهيئة الخادم وبدء التشغيل
- * ------------------------------------------------------------------------
- */
+
 async function startServer() {
     logSuccess('جاري بدء تشغيل نظام النشر الذكي (Sopen)...', 'SERVER_INIT');
     
-    // 🚨 الإجراء 3: التحقق من تحميل متغيرات البيئة
     if (config.MONGODB_URI.includes('localhost') && process.env.NODE_ENV === 'production') {
         logError('⚠️ تحذير: استخدام رابط MongoDB افتراضي في بيئة الإنتاج. تحقق من ملف .env.', null, 'CONFIG_CHECK_FAIL');
     }
     
     try {
-        // 1. الاتصال بقاعدة البيانات والخدمات المساعدة
-        
-        // ⬅️ الاتصال بـ MongoDB: حاسم - يجب انتظاره
+
         await connectDB();
         
-        // 🚨 التعديل الحاسم: إزالة 'await' من اتصال Redis
-        // نجعل الاتصال بـ Redis غير حاجِز (Non-blocking). إذا فشل، يُسجل الخطأ والخادم يستمر.
         connectRedis().catch(err => logError('فشل الاتصال بـ Redis. سيستمر الخادم في العمل بدون كاش.', err, 'REDIS_INIT_NON_CRITICAL'));
         
-        // 🚨 تجاوز RabbitMQ مؤقتاً لضمان بدء تشغيل الخادم
         if (config.RABBITMQ_URI) {
              console.log('[RABBITMQ_DISABLED] تجاوز اتصال RabbitMQ مؤقتاً بسبب أخطاء الأذونات. ستعمل دورة النشر بشكل متزامن وببطء.');
              console.log('[RABBITMQ_DISABLED] لإعادة تفعيل RabbitMQ، قم بإزالة التعليق من connectMQ و startConsumer في server.js.');
@@ -93,28 +66,21 @@ async function startServer() {
         }
 
         
-        // 2. تفعيل خدمة Express لخدمة الملفات الثابتة ومعالجة JSON
         app.use('/assets', express.static(WEBSITE_ASSETS_PATH));
         app.use('/pages', express.static(WEBSITE_PAGES_PATH));
         app.use(express.json());
         
-        // 3. دمج وحدات التوجيه (Routes)
         app.use('/api', publicRoutes);
         app.use('/api', userRoutes);
         app.use('/api/admin', adminRoutes);
-        
-        // 4. مسارات واجهة المستخدم (Admin & Profile)
 
-        // مسار صفحة لوحة التحكم الإدارية
         app.get('/dashboard', (req, res) => { 
              res.sendFile(path.join(WEBSITE_PAGES_PATH, 'dashboard.html'));
         });
         
-        // 5. مسار نقطة الدخول الرئيسية (يتم فيه توليد الصفحة)
         app.get('/', async (req, res) => {
             const homepagePath = path.join(WEBSITE_PAGES_PATH, 'index.html'); 
             
-            // محاولة توليد الصفحة الرئيسية إذا لم تكن موجودة
             if (!fs.existsSync(homepagePath)) {
                 await createHomepage().catch(err => logError('فشل في توليد الصفحة الرئيسية الأولية.', err, 'HOMEPAGE_INIT_FAIL'));
             }
@@ -127,11 +93,9 @@ async function startServer() {
            
         });
         
-        // 6. تهيئة وبدء نظام الجدولة والمراقبة
         setupAndStartScheduler(); 
         startFileWatcher();
 
-        // 7. بدء الاستماع على المنفذ
         const SERVER_PORT = process.env.PORT || config.PORT; 
 
         app.listen(SERVER_PORT, () => { 
@@ -147,5 +111,4 @@ async function startServer() {
     }
 }
 
-// تشغيل الخادم
 startServer();
